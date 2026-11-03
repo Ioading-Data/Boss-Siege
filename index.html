@@ -192,6 +192,10 @@
   #playerHpWrap{ width:170px; }
   .hpCol{ display:flex; flex-direction:column; gap:3px; }
   .barWrap.thin{ width:170px; height:6px; }
+  .barRow{ display:flex; align-items:center; gap:6px; }
+  .barNum{ font-size:11px; font-weight:700; color:#fff; text-shadow:0 1px 2px #000; font-variant-numeric:tabular-nums; min-width:56px; white-space:nowrap; }
+  .barNum.arm{ color:#8cc8ff; }
+  .barNum.shd{ color:#ffc46b; }
   #playerArmorFill, #bossArmorFill{ background:#4aa8ff; }
   #playerShieldFill{ background:#ff9f1a; }
   .barFill{ height:100%; width:100%; background:var(--cyan); transition:width .15s ease-out; }
@@ -387,9 +391,9 @@
       </div>
       <div class="hudRow" id="hudBottom">
         <div class="hpCol">
-          <div class="barWrap" id="playerHpWrap"><div class="barFill" id="playerHpFill"></div></div>
-          <div class="barWrap thin" id="playerArmorWrap" style="display:none"><div class="barFill" id="playerArmorFill"></div></div>
-          <div class="barWrap thin" id="playerShieldWrap" style="display:none"><div class="barFill" id="playerShieldFill"></div></div>
+          <div class="barRow"><div class="barWrap" id="playerHpWrap"><div class="barFill" id="playerHpFill"></div></div><span class="barNum" id="playerHpNum"></span></div>
+          <div class="barRow"><div class="barWrap thin" id="playerArmorWrap" style="display:none"><div class="barFill" id="playerArmorFill"></div></div><span class="barNum arm" id="playerArmorNum" style="display:none"></span></div>
+          <div class="barRow"><div class="barWrap thin" id="playerShieldWrap" style="display:none"><div class="barFill" id="playerShieldFill"></div></div><span class="barNum shd" id="playerShieldNum" style="display:none"></span></div>
         </div>
         <div class="tag" id="abilityTag"></div>
       </div>
@@ -2758,7 +2762,11 @@
     var p = S.player;
 
     if(p.attackCd>0) p.attackCd = Math.max(0,p.attackCd-dt*(S.atkBuffT>0 ? 2 : 1)*(1 + flagVal('offense')/100)*(S.hasteT>0 ? 1+S.hasteF : 1)); // true gambler 6: +100% attack speed; Spirit surge haste
-    if(p.dodgeCd>0) p.dodgeCd = Math.max(0,p.dodgeCd-dt);
+    if(p.dodgeCd>0){ // the dodge cooldown also drives the recharge bar under the player (cooldowns of 60 s or more are locks, not recharges)
+      p.dodgeCd = Math.max(0,p.dodgeCd-dt);
+      if(p.dodgeCd<60) S.dodgeCdMax = Math.max(S.dodgeCdMax||0, p.dodgeCd+dt);
+      if(p.dodgeCd<=0 && S.dodgeCdMax>0){ S.dodgeReadyAt = S.time; S.dodgeCdMax = 0; }
+    } else if(S.dodgeCdMax){ S.dodgeCdMax = 0; }
     if(p.fxT>0) p.fxT = Math.max(0,p.fxT-dt);
     if(p.abilCd>0 && !(S.abilFreezeT>0)) p.abilCd = Math.max(0,p.abilCd-dt*(1 + flagVal('defense')/100)); // roll 3 freezes cooldowns; defense flag shortens cooldowns
     if(CH.boss1hp && S.boss && S.boss.hp>1 && S.state==='playing' && !(MP.enabled && !MP.host)) S.boss.hp = 1; // cheat: every boss is down to 1 hp (the host's boss decides, guests see it)
@@ -3135,7 +3143,7 @@
     ninjaTick(dt); drillTick(p, dt); if(S.classKey==='hero') heroTick(p, dt); if(isSamurai(S.classKey)) samuraiTick(p, dt); else { S.iai = null; S.forceCrit = false; }
     if(S.deflCd>0) S.deflCd -= dt;
     if(keys.deflectRequested){ keys.deflectRequested = false;
-      if(S.state==='playing' && !S.spectating && !(S.deflCd>0)){ S.deflT = TWOH.deflT; S.deflCd = TWOH.deflCd; spawnParticles(p.x, p.y-CFG.playerH/2, '#9fd8ff', 14, 150); } }
+      if(S.state==='playing' && !S.spectating && !(S.deflCd>0) && S.classKey!=='hwacha' && S.classKey!=='chuKoNu'){ S.deflT = TWOH.deflT; S.deflCd = TWOH.deflCd; spawnParticles(p.x, p.y-CFG.playerH/2, '#9fd8ff', 14, 150); } }
     if(S.deflT>0){ S.deflT -= dt;
       var R = TWOH.deflR, py0 = p.y-CFG.playerH-80, py1 = p.y+20;
       for(var i=S.hazards.length-1;i>=0;i--){ var h = S.hazards[i], ok = false;
@@ -3502,6 +3510,20 @@
   }
   // ---------- HWACHA ----------
   var HW = { mag:100, shot:3, reload:3, rate:3, volleyT:3, volleyDmg:6, cone:0.5, spread:0.12, speed:1500, bowMin:9, bowMax:16, bursts:3, burstGap:0.3, cdBow:12, rTiny:0.75, rBig:1.25, cartOff:51 };
+  // ---------- manual reload (R): the Hwacha and the Chu Ko Nu can top the magazine up before it runs dry ----------
+  // The reload takes RELOAD_MIN of the full reload time when the magazine is nearly full, up to the whole time when it is almost empty. While it runs you cannot fire (same as the automatic reload).
+  // It does nothing when the magazine is full, during a reload, a burst or a volley, and in the Hwacha's bow form (no magazine). R used to trigger the two-hander's Deflect for every class; for these two it now reloads.
+  var RELOAD_MIN = 0.4;
+  function manualReload(){
+    var k = S.classKey; if(k!=='hwacha' && k!=='chuKoNu') return false;
+    var p = S.player; if(S.state!=='playing' || S.spectating || !p || p.hp<=0) return false;
+    if(k==='hwacha' && S.hwForm==='bow') return false;
+    var max = (k==='hwacha') ? HW.mag : CHU.mag, full = (k==='hwacha') ? HW.reload : CHU.reload, cur = (S.mag==null) ? max : S.mag;
+    if(S.reloadT>0 || S.burst || S.hwVol || cur>=max) return false;
+    S.reloadT = S.reloadMax = full * (RELOAD_MIN + (1-RELOAD_MIN)*(1 - cur/max));
+    p.fxT = 0.14; spawnParticles(p.x + p.dir*18, p.y-CFG.playerH*0.55, '#ffd23f', 6, 90);
+    return true;
+  }
   function initHwacha(key){ initSK(key); S.pinArmed = false; S.pinUses = 0; if(key==='ballista') S.cart = null; if(key==='hwacha'){ S.mag = HW.mag; S.reloadT = 0; S.reloadMax = HW.reload; S.burst = null; S.hwForm = 'cart'; S.cart = null; S.hwVol = null; } }
   function bowForm(){ return isBowLine(S.classKey) || (S.classKey==='hwacha' && S.hwForm==='bow'); }
   function hwMuzzle(p){ return { x:p.x + p.dir*HW.cartOff, y:p.y - 40 }; }
@@ -6436,6 +6458,35 @@
     if(hit && S.interact) castDoorVote(hit.id); // everyone votes; more than half of the party opens the door (a duo needs one vote)
     if(!isGuest && updateDoorVotes()) return;
   }
+  // ---------- dodge cooldown: a small recharge bar under your feet (and the seconds on the touch dodge button) ----------
+  // It fills while the roll recharges, and gives a short bright flash the moment it is ready again. Not shown when the dodge is locked (e.g. the Strongest One's counter stance).
+  // ---------- mana number: the overhead mana bar of the mana classes gets its numbers ("42/60") ----------
+  function drawManaNum(){
+    var p = S.player, k = S.classKey; if(!p || S.spectating || p.hp<=0) return;
+    if(!(isMageLine(k) || isArcane(k) || isVoid(k) || isSoul(k))) return;
+    if(p.invuln>0 && Math.floor(S.time*14)%2===0) return; // the bar blinks with the character
+    var mx = ROSTER[k] && ROSTER[k].mana; if(!(mx>0)) return;
+    var t = Math.floor(S.mana||0) + '/' + mx, ty = p.y - 84*PLAYER_SCALE - 7; // just above the bar, which is drawn at y-84 inside the scaled character
+    ctx.save(); ctx.textAlign = 'center'; ctx.font = 'bold 12px sans-serif'; ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.75)'; ctx.fillStyle = '#ffffff';
+    ctx.strokeText(t, p.x, ty); ctx.fillText(t, p.x, ty); ctx.restore();
+  }
+  function drawDodgeCd(){
+    var p = S.player; if(!p || S.spectating || p.hp<=0) return;
+    var cd = p.dodgeCd || 0, mx = S.dodgeCdMax || 0, flash = (S.time - (S.dodgeReadyAt||-9)) < 0.3;
+    var recharging = cd>0 && cd<60 && mx>0;
+    if(!recharging && !flash) return;
+    var cx = p.x, cy = p.y + 9, w = 40;
+    ctx.save(); ctx.lineCap = 'round';
+    if(recharging){
+      var f = Math.max(0, Math.min(1, 1 - cd/mx));
+      ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = 6; ctx.beginPath(); ctx.moveTo(cx-w/2, cy); ctx.lineTo(cx+w/2, cy); ctx.stroke();
+      ctx.strokeStyle = '#9fd8ff'; ctx.lineWidth = 3.4; ctx.beginPath(); ctx.moveTo(cx-w/2, cy); ctx.lineTo(cx-w/2 + w*f, cy); ctx.stroke();
+    } else {
+      var a = 1 - (S.time - S.dodgeReadyAt)/0.3;
+      ctx.globalAlpha = Math.max(0, a); ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 3.4 + 4*(1-a); ctx.beginPath(); ctx.moveTo(cx-w/2, cy); ctx.lineTo(cx+w/2, cy); ctx.stroke();
+    }
+    ctx.restore();
+  }
   function drawHubDoors(){
     if(!doorsVisible()) return;
     var open = S.state==='hub', gy = CFG.groundY;
@@ -7021,7 +7072,7 @@
     updateBoss(dt);
     if(MP.enabled && !MP.host && S.boss.gnd && !S.spectating && Math.abs(S.player.x-S.boss.x) < S.boss.width/2+hitW()/2 && S.player.y>=CFG.groundY-8) damagePlayer(10, { melee:true, boss:true }); // guest: the diving boss's body hurts you too
     updateBullets(dt); updateStorms(dt);
-    updateBleed(dt); updateIgnite(dt); updateMeteors(dt); updateClouds(dt); updateBloodPools(dt); updateRifts(dt); updatePinnacle(dt); updateWarlord(dt); updateGod(dt); updateSurp(dt); updateGhostBullets(dt); updateBeam(dt); updateSoul(dt); updateSoulSpells(dt);
+    updateBleed(dt); updateIgnite(dt); updateMeteors(dt); updateClouds(dt); updateBloodPools(dt); updateRifts(dt); if(keys.reloadRequested){ keys.reloadRequested = false; manualReload(); } updatePinnacle(dt); updateWarlord(dt); updateGod(dt); updateSurp(dt); updateGhostBullets(dt); updateBeam(dt); updateSoul(dt); updateSoulSpells(dt);
     updateClones(dt); updateDecoy(dt);
     updateHazards(dt);
     updateMinions(dt);
@@ -7359,7 +7410,10 @@
     ctx.save();
     ctx.translate(x, y); ctx.scale(PLAYER_SCALE, PLAYER_SCALE); ctx.translate(-x, -y); // scale around the feet
     if(isSK(S.classKey) && S.phantom) ctx.globalAlpha = 0.38; // Phantom phase: see-through
-    if(S.crouch && (S.classKey==='musket' || S.classKey==='cannoneer')){ ctx.translate(x, y); ctx.scale(1, 0.64); ctx.translate(-x, -y); } // Holdout: crouched
+    // Holdout: the body sits lower and the legs bend into a one-knee shooting stance (see crouchDrop below); nothing is squashed. p.cr eases 0..1 so it sinks and rises smoothly.
+    var crTarget = (S.crouch && (S.classKey==='musket' || S.classKey==='cannoneer')) ? 1 : 0;
+    p.cr = (p.cr||0) + (crTarget - (p.cr||0))*0.3; if(Math.abs(p.cr - crTarget) < 0.02) p.cr = crTarget;
+    var crouchDrop = 12*p.cr;
     if((isRogueLine(S.classKey) || isThiefLine(S.classKey) || isBrawlLine(S.classKey) || isMonkLine(S.classKey) || isBowLine(S.classKey) || S.classKey==='hwacha') && p.dodging){ // roll: spin the whole figure around its centre
       var rollA = (1 - Math.max(0, p.dodgeT)/CFG.dodgeDuration) * Math.PI*2 * p.dodgeDir;
       ctx.translate(x, y-26); ctx.rotate(rollA); ctx.translate(-x, -(y-26));
@@ -7403,8 +7457,15 @@
       ctx.fillStyle = '#6b4a2b'; ctx.strokeStyle = col; ctx.lineWidth = 1; roundRect(-3.5,-12,7,22,2); ctx.fill(); ctx.stroke(); ctx.restore();
     }
     ctx.strokeStyle = col; ctx.lineWidth = 2.2; // legs: scissor swing while walking
-    ctx.beginPath(); ctx.moveTo(-2,-14); ctx.lineTo(-4+legSwing, 0); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(2,-14);  ctx.lineTo(4-legSwing, 0);  ctx.stroke();
+    if(crouchDrop > 0.05){ // Holdout: back knee down behind, front knee raised, feet planted; blends in from the straight legs as p.cr rises
+      var cr = p.cr, hipY = -14 + crouchDrop, lp = function(a, b){ return a + (b-a)*cr; };
+      ctx.beginPath(); ctx.moveTo(-2,hipY); ctx.lineTo(lp(-3,-9), lp(-7,-1)); ctx.lineTo(lp(-4+legSwing,-15), lp(0,-2)); ctx.stroke();   // back leg: knee near the ground, shin trailing behind
+      ctx.beginPath(); ctx.moveTo(2,hipY);  ctx.lineTo(lp(3,10),  lp(-7,-9)); ctx.lineTo(lp(4-legSwing,9),  0);          ctx.stroke();   // front leg: knee up and forward, foot flat
+      ctx.translate(0, crouchDrop); // the torso, head, arms (shoulderY) and weapon are all drawn lower
+    } else {
+      ctx.beginPath(); ctx.moveTo(-2,-14); ctx.lineTo(-4+legSwing, 0); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(2,-14);  ctx.lineTo(4-legSwing, 0);  ctx.stroke();
+    }
     ctx.fillStyle = '#0a0d1c'; ctx.strokeStyle = col; ctx.lineWidth = 1.4; // torso
     roundRect(-6,-38,12,24,4); ctx.fill(); roundRect(-6,-38,12,24,4); ctx.stroke();
     if(S.classKey==='base' || S.classKey==='jackOfAll'){ // pebble bandolier (base and Jack of All)
@@ -7757,7 +7818,7 @@
       ctx.restore();
     }
 
-    var shoulderY = y - 30;
+    var shoulderY = y - 30 + crouchDrop;
     var backShoulderX = cx - p.dir*3;
     var frontShoulderX = cx + p.dir*4;
 
@@ -7972,6 +8033,7 @@
         ctx.strokeStyle = '#6b4f2a'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(cartX-p.dir*17, y-24); ctx.lineTo(handX, handY); ctx.stroke(); // handle to your hand
         var hm = (S.mag==null ? HW.mag : S.mag), hrl = (S.reloadT>0 ? 1 - S.reloadT/(S.reloadMax||HW.reload) : 1);
         ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = (S.hwVol ? '#ffd23f' : (hm<=15 ? '#ff6b6b' : '#e8edff')); ctx.fillText(S.hwVol ? 'VOLLEY' : (hm + '/' + HW.mag), cx, y-90);
+        if(!S.hwVol && !(S.reloadT>0) && hm<HW.mag){ ctx.font = '10px sans-serif'; ctx.fillStyle = '#9aa7d6'; ctx.fillText('R reload', cx, y-102); }
         if(S.reloadT>0){ ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(cx-18,y-84,36,5); ctx.fillStyle = '#ffb347'; ctx.fillRect(cx-18,y-84,36*hrl,5); }
         ctx.restore();
         return;
@@ -8021,6 +8083,7 @@
         ctx.fillStyle = '#8b6b3a'; ctx.strokeStyle = '#4a3519'; ctx.lineWidth = 1; ctx.fillRect(handX-p.dir*2-7, handY-11, 14, 8); ctx.strokeRect(handX-p.dir*2-7, handY-11, 14, 8);
         var mg = (S.mag==null ? CHU.mag : S.mag), rl = (S.reloadT>0 ? 1 - S.reloadT/(S.reloadMax||CHU.reload) : 1);
         ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = (S.burst ? '#ffd23f' : (mg<=3 ? '#ff6b6b' : '#e8edff')); ctx.fillText(S.burst ? 'BURST' : (mg + '/' + CHU.mag), cx, y-90);
+        if(!S.burst && !(S.reloadT>0) && mg<CHU.mag){ ctx.font = '10px sans-serif'; ctx.fillStyle = '#9aa7d6'; ctx.fillText('R reload', cx, y-102); }
         if(S.reloadT>0){ ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(cx-18,y-84,36,5); ctx.fillStyle = '#6bff6b'; ctx.fillRect(cx-18,y-84,36*rl,5); }
       }
       ctx.restore();
@@ -8703,6 +8766,8 @@
     if(S.state==='mapSelect' || S.state==='shop' || S.state==='ritual'){
       drawRoom();
       drawPlayer();
+      drawManaNum();
+      drawDodgeCd();
       MP.drawRemotes();
     } else {
     drawBackground();
@@ -8719,6 +8784,8 @@
       drawImmortalAura();
       drawClones();
       drawPlayer();
+      drawManaNum();
+      drawDodgeCd();
       drawDrill();
       drawBeam();
       drawIai();
@@ -8759,11 +8826,14 @@
     if(S.player){
       playerHpFill.style.width = Math.max(0,(S.player.hp/S.player.maxHP*100)) + '%';
       playerHpFill.classList.toggle('low', S.player.hp/S.player.maxHP < 0.3);
+      document.getElementById('playerHpNum').textContent = Math.max(0, Math.ceil(S.player.hp)) + '/' + Math.round(S.player.maxHP);
       var pq = S.player, aWrap = document.getElementById('playerArmorWrap'), sWrap = document.getElementById('playerShieldWrap');
       aWrap.style.display = pq.armorMax>0 ? '' : 'none';
       if(pq.armorMax>0) document.getElementById('playerArmorFill').style.width = Math.max(0, pq.armor/pq.armorMax*100) + '%';
+      var aNum = document.getElementById('playerArmorNum'); aNum.style.display = pq.armorMax>0 ? '' : 'none'; if(pq.armorMax>0) aNum.textContent = Math.max(0, Math.ceil(pq.armor||0)) + '/' + Math.round(pq.armorMax);
       sWrap.style.display = pq.tShield>0 ? '' : 'none';
       if(pq.tShield>0) document.getElementById('playerShieldFill').style.width = Math.min(100, pq.tShield/(pq.tCap||10)*100) + '%';
+      var sNum = document.getElementById('playerShieldNum'); sNum.style.display = pq.tShield>0 ? '' : 'none'; if(pq.tShield>0) sNum.textContent = Math.ceil(pq.tShield) + '/' + (pq.tCap||10);
     }
     var abTag = document.getElementById('abilityTag'), abBtn = document.getElementById('btnAbility');
     var showAb = !!(S.player && hasAbility(S.classKey));
@@ -8776,7 +8846,10 @@
       if(S.classKey==='hero') abTag.textContent += '  \u00b7  Beams left: ' + Math.max(0, HERO.uses-(S.beamUses||0));
       if(isTwoHand(S.classKey)) abTag.textContent += '  \u00b7  Deflect [R]: ' + ((S.deflCd||0)>0 ? S.deflCd.toFixed(1) + 's' : 'READY');
     }
-    document.getElementById('btnDeflect').style.display = (S.player && isTwoHand(S.classKey)) ? 'flex' : 'none';
+    var dodgeBtn = document.getElementById('btnDodge');
+    if(dodgeBtn && S.player){ var dcd = S.player.dodgeCd || 0, dOn = dcd>0 && dcd<60; dodgeBtn.style.opacity = dOn ? '0.45' : ''; dodgeBtn.textContent = dOn ? dcd.toFixed(1) : '\u21f6'; }
+    var reloadCls = !!(S.player && (S.classKey==='hwacha' || S.classKey==='chuKoNu')), dbtn = document.getElementById('btnDeflect');
+    dbtn.style.display = (S.player && (isTwoHand(S.classKey) || reloadCls)) ? 'flex' : 'none'; dbtn.textContent = reloadCls ? '\u21bb' : '\ud83d\udee1'; dbtn.setAttribute('aria-label', reloadCls ? 'Reload (R)' : 'Deflect (R)');
     var showSoul = !!(S.player && isSoul(S.classKey)), soulTagEl = document.getElementById('soulTag'), soulBtnsEl = document.getElementById('soulBtns');
     soulTagEl.style.display = showSoul ? 'block' : 'none'; soulBtnsEl.style.display = showSoul ? 'flex' : 'none';
     if(showSoul){ soulTagEl.textContent = soulSpellLine(); [1,2,3,4].forEach(function(n){ var sk = soulSlotKey(n), b = document.getElementById('btnSpell'+n); b.classList.toggle('locked', !soulSpellOpen(sk)); }); }
@@ -8786,7 +8859,7 @@
 
   // ---------- online co-op (WebRTC via PeerJS) ----------
 
-  var BUILD = '2026-10-31a'; // bump this letter or date every time the file changes, so you can tell which copy is the newest (multiplayer compares it: host and guests on different builds get a warning)
+  var BUILD = '2026-11-02b'; // bump this letter or date every time the file changes, so you can tell which copy is the newest (multiplayer compares it: host and guests on different builds get a warning)
   // ---------- anticheat: host checks on guests, tamper detection, flag log ----------
   // Honest limit: anything running in a player's browser can be edited. These layers raise the effort and make cheating visible.
   var AC = (function(){
@@ -9400,10 +9473,10 @@
     var fl = pl[7]|0, dir = pl[2] || 1, saved = { player:S.player, classKey:S.classKey, spectating:S.spectating, aimX:S.aimX, aimY:S.aimY, mana:S.mana, crouch:S.crouch }, zs = {}, i, ok = false;
     for(i=0;i<REMOTE_ZERO.length;i++){ zs[REMOTE_ZERO[i]] = S[REMOTE_ZERO[i]]; S[REMOTE_ZERO[i]] = 0; }
     try{
-      var p = Object.assign({}, saved.player, { x:rp.x, y:rp.y, dir:dir, hp:pl[3], maxHP:pl[6] || CFG.playerMaxHP, invuln:0, dodging:!!(fl&2), dodgeT:CFG.dodgeDuration*((S.time*2.5)%1), dodgeDir:dir, slash:!!(fl&1), fxT:0, guardT:(fl&4) ? 0.5 : 0, tShield:0, barrierT:0, bashHold:0, bowT:0, charging:!!(fl&8), attackCd:(fl&1) ? 0.2 : 0, grounded:true, vx:Math.abs(dx)>1.2 ? dx*30 : 0 });
+      var p = Object.assign({}, saved.player, { x:rp.x, y:rp.y, dir:dir, hp:pl[3], maxHP:pl[6] || CFG.playerMaxHP, invuln:0, dodging:!!(fl&2), dodgeT:CFG.dodgeDuration*((S.time*2.5)%1), dodgeDir:dir, cr:rp.cr||0, slash:!!(fl&1), fxT:0, guardT:(fl&4) ? 0.5 : 0, tShield:0, barrierT:0, bashHold:0, bowT:0, charging:!!(fl&8), attackCd:(fl&1) ? 0.2 : 0, grounded:true, vx:Math.abs(dx)>1.2 ? dx*30 : 0 });
       S.player = p; S.classKey = cls; S.spectating = false; S.crouch = !!(fl&16); S.mana = ROSTER[cls].mana || 0;
       S.aimX = (pl[8]!=null && pl[8]!==0) ? pl[8] : rp.x + dir*220; S.aimY = (pl[9]!=null && pl[9]!==0) ? pl[9] : rp.y - 40;
-      drawPlayer(); ok = true;
+      drawPlayer(); rp.cr = p.cr; ok = true;
     }catch(e){ MP.rdFail[cls] = true; try{ console.error('remote draw failed for', cls, e); }catch(_){} }
     finally{
       S.player = saved.player; S.classKey = saved.classKey; S.spectating = saved.spectating; S.aimX = saved.aimX; S.aimY = saved.aimY; S.mana = saved.mana; S.crouch = saved.crouch;
@@ -10258,7 +10331,7 @@
     if((e.key==='f'||e.key==='F') && !e.repeat){ keys.abilityRequested = true; }
     if(S.skMenu && S.state==='playing' && !e.repeat && /^[1-3]$/.test(e.key)) summonSkeleton(['base','warrior','kings'][+e.key-1]);
     if(isSoul(S.classKey) && !S.skMenu && S.state==='playing' && !e.repeat && /^[1-4]$/.test(e.key)) keys.spellReq = +e.key; // Soulbinding Warlock: stage spells
-    if((e.key==='r'||e.key==='R') && !e.repeat){ keys.deflectRequested = true; }
+    if((e.key==='r'||e.key==='R') && !e.repeat){ keys.deflectRequested = true; keys.reloadRequested = true; }
     if(e.key==='f'||e.key==='F') keys.abilHeld = true;
     if((e.key==='e'||e.key==='E') && !e.repeat){ keys.interactRequested = true; }
     if(e.key==='Enter'){ handlePrimaryAction(); }
@@ -10282,7 +10355,7 @@
   bindHold(document.getElementById('btnJump'), function(){keys.jump=true;}, function(){keys.jump=false;});
   document.getElementById('btnDodge').addEventListener('pointerdown', function(e){ e.preventDefault(); keys.dodgeRequested = true; }, {passive:false});
   document.getElementById('btnInteract').addEventListener('pointerdown', function(e){ e.preventDefault(); keys.interactRequested = true; }, {passive:false});
-  document.getElementById('btnDeflect').addEventListener('pointerdown', function(e){ e.preventDefault(); keys.deflectRequested = true; }, {passive:false});
+  document.getElementById('btnDeflect').addEventListener('pointerdown', function(e){ e.preventDefault(); if(S.classKey==='hwacha' || S.classKey==='chuKoNu') keys.reloadRequested = true; else keys.deflectRequested = true; }, {passive:false});
   document.getElementById('btnAbility').addEventListener('pointerdown', function(e){ e.preventDefault(); keys.abilityRequested = true; keys.abilHeld = true; }, {passive:false});
   ['pointerup','pointercancel','pointerleave'].forEach(function(ev){ document.getElementById('btnAbility').addEventListener(ev, function(){ keys.abilHeld = false; }); });
   [1,2,3,4].forEach(function(n){ document.getElementById('btnSpell'+n).addEventListener('pointerdown', function(e){ e.preventDefault(); keys.spellReq = n; }, {passive:false}); });
